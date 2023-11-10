@@ -1,0 +1,130 @@
+name: alpr
+
+parameters:
+  frame:
+    width: 2560
+    height: 1440
+  output_frame:
+    codec: jpeg
+  draw_func:
+    module: alpr.overlay
+    # specify the drawfunc's python class from the module
+    class_name: Overlay
+    kwargs:
+      config_path: ${oc.env:PROJECT_CONFIG_PATH}/config.yml
+  post_processor:
+    min_text_len: 9
+    max_text_len: 10
+    private_lp_state_codes: [ AN, AP, AR, AS, BH, BR, CH, CG, DD, DL, GA, GJ, HR, HP, JK, JH, KA, KL, LA, LD, MP, MH, MN, ML, MZ, NL, OD, PY, PB, RJ, SK, TN, TS, TR, UP, UK, WB]
+
+pipeline:
+  elements:
+    # To remove sources not present in the config file
+    - element: pyfunc
+      module: alpr.post_processor
+      class_name: ConditionalDetectorSkip
+      kwargs:
+        config_path: ${oc.env:PROJECT_CONFIG_PATH}/config.yml
+
+    # Vehicle Detector
+    - element: nvinfer@detector
+      name: VehicleDetector
+      model:
+        remote:
+          url: https://github.com/tamnguyenvan/stream-alpr/releases/download/v0.1/yolo_nas_s_coco.zip
+        format: onnx
+        model_file: yolo_nas_s_coco.onnx
+        config_file: config_infer_primary_yolonas.txt
+        precision: fp16
+        batch_size: 8
+        output:
+          objects:
+            - class_id: 2
+              label: vehicle  # car
+            - class_id: 3
+              label: vehicle  # motorbike
+            - class_id: 5
+              label: vehicle  # bus
+            - class_id: 7
+              label: vehicle  # truck
+
+    # To remove object metas are outside of the Global RoI
+    - element: pyfunc
+      module: alpr.post_processor
+      class_name: ObjectDetectorSkip
+      kwargs:
+        config_path: ${oc.env:PROJECT_CONFIG_PATH}/config.yml
+
+    # tracker
+    - element: nvtracker
+      properties:
+        ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+        ll-config-file: ${oc.env:PROJECT_CONFIG_PATH}/config_tracker_NvDCF_perf.yml
+        tracker-width: 960  # 640  # must be a multiple of 32
+        tracker-height: 544  # 384
+        display-tracking-id: 0
+
+    # LPDetector
+    - element: nvinfer@detector
+      name: LPDetector
+      model:
+        remote:
+          url: https://github.com/tamnguyenvan/stream-alpr/releases/download/v0.1/yolo_nas_s_lp_det.zip
+        format: onnx
+        model_file: yolo_nas_s_lp_det.onnx
+        config_file: config_infer_primary_yolonas_custom.txt
+        precision: fp16
+        batch_size: 8
+        input:
+          object: VehicleDetector.vehicle
+          scale_factor: 0.0039215697906911373
+        output:
+          objects:
+            - class_id: 0
+              label: lp
+
+    # To remove License Plate object metas are outside of the License Plate RoI
+    - element: pyfunc
+      module: alpr.post_processor
+      class_name: LicensePlateDetectorSkip
+      kwargs:
+        config_path: ${oc.env:PROJECT_CONFIG_PATH}/config.yml
+
+    # LPRecognizer
+    - element: nvinfer@classifier
+      name: LPRecognizer
+      model:
+        remote:
+          url: https://github.com/tamnguyenvan/stream-alpr/releases/download/v0.1/parseq_text_rec.zip
+        format: onnx
+        model_file: parseq_text_rec.onnx
+        config_file: config_parseq_text_rec.txt
+        precision: fp16
+        batch_size: 1
+        input:
+          layer_name: input.1
+          object: LPDetector.lp
+          shape: [3, 32, 128]
+          offsets: [127.5, 127.5, 127.5]
+          scale_factor: 0.00784313725490196
+          color_format: rgb
+        output:
+          layer_names: [ '1541' ]
+          converter:
+            module: alpr.converter
+            class_name: LPRecognitionTensorToLabelConverter
+            kwargs:
+              conf_threshold: 0.5
+          attributes:
+            - name: text
+
+    # post processing
+    - element: pyfunc
+      module: alpr.post_processor
+      class_name: PostProcessor
+      kwargs:
+        config_path: ${oc.env:PROJECT_CONFIG_PATH}/config.yml
+        stale_track_del_period: 5000
+        min_text_len: ${parameters.post_processor.min_text_len}
+        max_text_len: ${parameters.post_processor.max_text_len}
+        private_lp_state_codes: ${parameters.post_processor.private_lp_state_codes}

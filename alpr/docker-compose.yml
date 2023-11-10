@@ -1,0 +1,30 @@
+include:
+  - docker-compose.source.yml
+
+services:
+  savant-module-alpr:
+    image: ghcr.io/insight-platform/savant-deepstream:latest
+    container_name: savant-module-alpr
+    volumes:
+      - ./models:/models
+      - ./downloads:/downloads
+    command: alpr/module.yml
+    environment:
+      - ZMQ_SRC_ENDPOINT=sub+bind:tcp://0.0.0.0:3331
+      - ZMQ_SINK_ENDPOINT=pub+bind:tcp://0.0.0.0:3332
+      - FPS_PERIOD=1000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [ gpu ]
+    networks:
+      - global-network
+    restart: unless-stopped
+
+networks:
+  global-network:
+    name: network
+    external: true
